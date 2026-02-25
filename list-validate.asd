@@ -1,5 +1,5 @@
 (defsystem "list-validate"
-  :version "0.0.1"
+  :version "1.0.0"
   :author "arlechann"
   :license "CC0-1.0"
   :components ((:module "src"

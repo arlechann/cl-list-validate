@@ -3,6 +3,12 @@
         :rove))
 (in-package :list-validate/tests/validate)
 
+(defclass broken-print-object () ())
+
+(defmethod print-object ((obj broken-print-object) stream)
+  (declare (ignore obj stream))
+  (error "intentional print-object failure"))
+
 (deftest validate-success
   (testing "validate が正常系で値を束縛する"
     (ok (equal
@@ -56,6 +62,67 @@
            '((:id . "10"))
            id)
          "10"))))
+
+(deftest validate-value-macro
+  (testing "validate-value は単一値を検証できる"
+    (ok (equal
+         (list-validate:validate-value (id 10 :required :integer)
+           id)
+         10))
+    (ok (equal
+         (list-validate:validate-value (id 10)
+           id)
+         10))
+    (ok (handler-case
+            (progn
+              (list-validate:validate-value (id "10" :integer)
+                id)
+              nil)
+          (list-validate:validation-error () t)))))
+
+(deftest parse-value-macro
+  (testing "parse-value は単一値をパースできる"
+    (ok (equal
+         (list-validate:parse-value (id "10" :integer)
+           id)
+         10))
+    (ok (equal
+         (list-validate:parse-value (id "10")
+           id)
+         "10"))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-value (id "abc" :integer)
+                id)
+              nil)
+          (list-validate:validation-parse-error () t)))))
+
+(deftest parse+validate-value-macro
+  (testing "parse+validate-value は単一値を parse->validate できる"
+    (ok (equal
+         (list-validate:parse+validate-value
+             (id "10" (:parse :integer) (:validate :required :integer))
+           id)
+         10))
+    (ok (equal
+         (list-validate:parse+validate-value
+             (id "10" (:parse :integer))
+           id)
+         10))
+    (ok (handler-case
+            (progn
+              (list-validate:parse+validate-value
+                  (id "abc" (:parse :integer) (:validate :integer))
+                id)
+              nil)
+          (list-validate:validation-parse-error () t)))
+    (ok (handler-case
+            (progn
+              (list-validate:parse+validate-value
+                  (id "11" (:parse :integer) (:validate (:between 1 10)))
+                id)
+              nil)
+          (list-validate:validation-error () t)))))
 
 (deftest parse+validate-success
   (testing "parse+validate が parse->validate を実行する"
@@ -116,6 +183,37 @@
                 nil)
             (list-validate:validation-error () t))))))
 
+(deftest define-validator-with-resolver-arg
+  (testing "define-validator は再帰評価用引数を受け取れる"
+    (let ((tag (intern (format nil "TMP-RESOLVER-VALIDATOR-~A" (gensym)) :keyword)))
+      (eval `(list-validate:define-validator ,tag (v validate)
+               (funcall validate :integer v)))
+      (ok (equal
+           (eval `(list-validate:validate-alist ((v :v ,tag))
+                    '((:v . 10))
+                  v))
+           10))
+      (ok (handler-case
+              (progn
+                (eval `(list-validate:validate-alist ((v :v ,tag))
+                         '((:v . "10"))
+                       v))
+                nil)
+            (list-validate:validation-error () t))))))
+
+(deftest define-validator-implicit-rule-block
+  (testing "define-validator はルール名の暗黙 block を持つ"
+    (let ((tag (intern (format nil "TMP-BLOCK-VALIDATOR-~A" (gensym)) :keyword)))
+      (eval `(list-validate:define-validator ,tag (v)
+               (ignore-errors v)
+               (return-from ,tag t)
+               nil))
+      (ok (equal
+           (eval `(list-validate:validate-alist ((v :v ,tag))
+                    '((:v . "anything"))
+                  v))
+           "anything")))))
+
 (deftest define-parser-around-qualifier
   (testing "define-parser は :around 修飾子と next-parser を受け付ける"
     (let ((tag (intern (format nil "TMP-AROUND-PARSER-~A" (gensym)) :keyword)))
@@ -139,6 +237,37 @@
                        v))
                 nil)
             (list-validate:validation-parse-error () t))))))
+
+(deftest define-parser-with-resolver-arg
+  (testing "define-parser は再帰評価用引数を受け取れる"
+    (let ((tag (intern (format nil "TMP-RESOLVER-PARSER-~A" (gensym)) :keyword)))
+      (eval `(list-validate:define-parser ,tag (v parse)
+               (funcall parse :integer v)))
+      (ok (equal
+           (eval `(list-validate:parse-alist ((v :v ,tag))
+                    '((:v . "10"))
+                  v))
+           10))
+      (ok (handler-case
+              (progn
+                (eval `(list-validate:parse-alist ((v :v ,tag))
+                         '((:v . "abc"))
+                       v))
+                nil)
+            (list-validate:validation-parse-error () t))))))
+
+(deftest define-parser-implicit-rule-block
+  (testing "define-parser はルール名の暗黙 block を持つ"
+    (let ((tag (intern (format nil "TMP-BLOCK-PARSER-~A" (gensym)) :keyword)))
+      (eval `(list-validate:define-parser ,tag (v)
+               (ignore-errors v)
+               (return-from ,tag (values t :ok))
+               (values nil nil)))
+      (ok (equal
+           (eval `(list-validate:parse-alist ((v :v ,tag))
+                    '((:v . "anything"))
+                  v))
+           :ok)))))
 
 (deftest define-parser-detects-empty-arg-redefinition
   (testing "define-parser は0引数ルールの不整合再定義を検出する"
@@ -416,6 +545,82 @@
               nil)
           (list-validate:validation-error () t)))))
 
+(deftest validator-list-rules
+  (testing "validator :list/(:list ...) ルールが動作する"
+    (ok (equal
+         (list-validate:validate-alist ((v :v :list))
+           '((:v . (1 2 3)))
+           v)
+         '(1 2 3)))
+    (ok (equal
+         (list-validate:validate-alist ((v :v (:list :integer :string)))
+           '((:v . (1 "a")))
+           v)
+         '(1 "a")))
+    (ok (equal
+         (list-validate:validate-alist ((v :v (:list :integer (:list :integer :integer))))
+           '((:v . (1 (2 3))))
+           v)
+         '(1 (2 3))))
+    (ok (handler-case
+            (progn
+              (list-validate:validate-alist ((v :v (:list :integer :string)))
+                '((:v . (1 2)))
+                v)
+              nil)
+          (list-validate:validation-error () t)))
+    (ok (handler-case
+            (progn
+              (list-validate:validate-alist ((v :v (:list :integer :string)))
+                '((:v . (1 "a" "extra")))
+                v)
+              nil)
+          (list-validate:validation-error () t)))))
+
+(deftest validator-alist-rules
+  (testing "validator :alist/(:alist ...) ルールが動作する"
+    (ok (equal
+         (list-validate:validate-alist ((v :v :alist))
+           '((:v . ((:id . 10) ("name" . "alice"))))
+           v)
+         '((:id . 10) ("name" . "alice"))))
+    (ok (equal
+         (list-validate:validate-alist
+             ((v :v (:alist :id :integer "name" :string)))
+           '((:v . ((:id . 10) ("name" . "alice"))))
+           v)
+         '((:id . 10) ("name" . "alice"))))
+    (ok (handler-case
+            (progn
+              (list-validate:validate-alist
+                  ((v :v (:alist :id :integer "name" :string)))
+                '((:v . ((:id . "10") ("name" . "alice"))))
+                v)
+              nil)
+          (list-validate:validation-error () t)))))
+
+(deftest validator-plist-rules
+  (testing "validator :plist/(:plist ...) ルールが動作する"
+    (ok (equal
+         (list-validate:validate-alist ((v :v :plist))
+           '((:v . (:id 10 "name" "alice")))
+           v)
+         '(:id 10 "name" "alice")))
+    (ok (equal
+         (list-validate:validate-alist
+             ((v :v (:plist :id :integer "name" :string)))
+           '((:v . (:id 10 "name" "alice")))
+           v)
+         '(:id 10 "name" "alice")))
+    (ok (handler-case
+            (progn
+              (list-validate:validate-alist
+                  ((v :v (:plist :id :integer "name" :string)))
+                '((:v . (:id "10" "name" "alice")))
+                v)
+              nil)
+          (list-validate:validation-error () t)))))
+
 (deftest validator-min-max-between-rules
   (testing "validator :min/:max/:between ルールが動作する"
     (ok (equal
@@ -438,6 +643,16 @@
            '((:v . "abc"))
            v)
          "abc"))
+    (ok (equal
+         (list-validate:validate-alist ((v :v (:min-length 2) (:max-length 4)))
+           '((:v . (1 2 3)))
+           v)
+         '(1 2 3)))
+    (ok (equalp
+         (list-validate:validate-alist ((v :v (:min-length 2) (:max-length 4)))
+           '((:v . #(1 2 3)))
+           v)
+         #(1 2 3)))
     (ok (handler-case
             (progn
               (list-validate:validate-alist ((v :v (:length 3)))
@@ -468,11 +683,13 @@
            '((:v . "10"))
            v)
          10))
-    (ok (equal
-         (list-validate:parse-alist ((v :v (:not :string)))
-           '((:v . 10))
-           v)
-         10))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-alist ((v :v (:not :string)))
+                '((:v . 10))
+                v)
+              nil)
+          (list-validate:validation-parse-error () t)))
     (ok (handler-case
             (progn
               (list-validate:parse-alist ((v :v (:not :string)))
@@ -480,6 +697,169 @@
                 v)
               nil)
               (list-validate:validation-parse-error () t)))))
+
+(deftest parser-and-rules
+  (testing "parser :and ルールが動作する"
+    (ok (equal
+         (list-validate:parse-alist ((v :v (:and :integer :integer)))
+           '((:v . "10"))
+           v)
+         10))
+    (ok (equal
+         (list-validate:parse-alist ((v :v (:and :integer :string)))
+           '((:v . "10"))
+           v)
+         "10"))))
+
+(deftest parser-list-rules
+  (testing "parser :list/(:list ...) ルールが動作する"
+    (ok (equal
+         (list-validate:parse-alist ((v :v :list))
+           '((:v . (1 "a")))
+           v)
+         '(1 "a")))
+    (ok (equal
+         (list-validate:parse-alist ((v :v (:list :integer :string)))
+           '((:v . ("10" "a")))
+           v)
+         '(10 "a")))
+    (ok (equal
+         (list-validate:parse-alist ((v :v (:list :integer :string)))
+           '((:v . #("10" "a")))
+           v)
+         '(10 "a")))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-alist ((v :v (:list :integer :string)))
+                '((:v . ("x" "a")))
+                v)
+              nil)
+          (list-validate:validation-parse-error () t)))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-alist ((v :v (:list :integer :string)))
+                '((:v . ("10")))
+                v)
+              nil)
+          (list-validate:validation-parse-error () t)))))
+
+(deftest parser-additional-rules
+  (testing "追加 parser ルール (:float/:number/:boolean/:keyword/:symbol/:split/:join/:trim/:null-if-empty/:map/:chain) が動作する"
+    (let ((f (list-validate:parse-alist ((v :v :float))
+               '((:v . "1.25"))
+               v)))
+      (ok (floatp f))
+      (ok (= f 1.25)))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :number))
+           '((:v . "10"))
+           v)
+         10))
+    (let ((n (list-validate:parse-alist ((v :v :number))
+               '((:v . "2.5"))
+               v)))
+      (ok (numberp n))
+      (ok (= n 2.5)))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :boolean))
+           '((:v . "true"))
+           v)
+         t))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :boolean))
+           '((:v . "0"))
+           v)
+         nil))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :keyword))
+           '((:v . "foo"))
+           v)
+         :FOO))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :keyword))
+           '((:v . bar))
+           v)
+         :BAR))
+    (let ((sym (list-validate:parse-alist ((v :v :symbol))
+                 '((:v . "foo"))
+                 v)))
+      (ok (symbolp sym))
+      (ok (string= (symbol-name sym) "FOO")))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :string))
+           '((:v . 123))
+           v)
+         "123"))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :trim))
+           '((:v . "  abc  "))
+           v)
+         "abc"))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :null-if-empty))
+           '((:v . "   "))
+           v)
+         nil))
+    (ok (equal
+         (list-validate:parse-alist ((v :v :null-if-empty))
+           '((:v . "abc"))
+           v)
+         "abc"))
+    (ok (equal
+         (list-validate:parse-alist ((v :v (:split ",")))
+           '((:v . "a,b,c"))
+           v)
+         '("a" "b" "c")))
+    (ok (equal
+         (list-validate:parse-alist ((v :v (:join "-")))
+           '((:v . ("a" "b" "c")))
+           v)
+         "a-b-c"))
+    (ok (equal
+         (list-validate:parse-alist ((v :v (:map :integer)))
+           '((:v . #("1" "2" "3")))
+           v)
+         '(1 2 3)))
+    (ok (equal
+         (list-validate:parse-alist ((v :v (:chain :trim :integer)))
+           '((:v . " 10 "))
+           v)
+         10))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-alist ((v :v :float))
+                '((:v . "x"))
+                v)
+              nil)
+          (list-validate:validation-parse-error () t)))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-alist ((v :v :boolean))
+                '((:v . "maybe"))
+                v)
+              nil)
+          (list-validate:validation-parse-error () t)))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-alist ((v :v (:map :integer)))
+                '((:v . ("1" "x")))
+                v)
+              nil)
+          (list-validate:validation-parse-error () t)))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-alist ((v :v (:chain :trim :integer)))
+                '((:v . "x"))
+                v)
+              nil)
+          (list-validate:validation-parse-error () t)))
+    (ok (handler-case
+            (progn
+              (list-validate:parse-alist ((v :v :string))
+                (list (cons :v (make-instance 'broken-print-object)))
+                v)
+              nil)
+          (list-validate:validation-parse-error () t)))))
 
 (deftest optional-rule-order
   (testing ":optional は前方指定時のみ後続ルールをスキップできる"

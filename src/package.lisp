@@ -3,12 +3,15 @@
   (:export #:validate-alist
            #:validate-plist
            #:validate-list
+           #:validate-value
            #:parse-alist
            #:parse-plist
            #:parse-list
+           #:parse-value
            #:parse+validate-alist
            #:parse+validate-plist
            #:parse+validate-list
+           #:parse+validate-value
            #:validation-error
            #:validation-error-field
            #:validation-error-value
